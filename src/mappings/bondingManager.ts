@@ -1,5 +1,6 @@
 import { store } from "@graphprotocol/graph-ts";
 import {
+  computeShares,
   convertFromDecimal,
   convertToDecimal,
   createOrLoadDelegator,
@@ -17,6 +18,7 @@ import {
   percOf,
   PRECISE_PERC_DIVISOR,
   precisePercOf,
+  saveDelegatorSnapshot,
   ZERO_BI,
 } from "../../utils/helpers";
 // Import event types from the registrar contract ABIs
@@ -38,7 +40,6 @@ import {
 } from "../types/BondingManager/BondingManager";
 import {
   BondEvent,
-  DelegatorSnapshot,
   EarningsClaimedEvent,
   ParameterUpdateEvent,
   Pool,
@@ -140,21 +141,11 @@ export function bond(event: Bond): void {
     convertToDecimal(event.params.additionalAmount)
   );
 
-  // Compute shares: bondedAmount * 10^27 / crf[lastClaimRound]
-  // shares is invariant across claims, only changes on bond/unbond
-  let poolForShares = Pool.load(
-    makePoolId(event.params.newDelegate.toHex(), round.id)
+  delegator.shares = computeShares(
+    event.params.newDelegate.toHex(),
+    round.id,
+    event.params.bondedAmount
   );
-  let sharesRefCRF = PRECISE_PERC_DIVISOR;
-  if (
-    poolForShares &&
-    !poolForShares.cumulativeRewardFactor.equals(ZERO_BI)
-  ) {
-    sharesRefCRF = poolForShares.cumulativeRewardFactor;
-  }
-  delegator.shares = event.params.bondedAmount
-    .times(PRECISE_PERC_DIVISOR)
-    .div(sharesRefCRF);
 
   round.save();
   delegate.save();
@@ -162,16 +153,13 @@ export function bond(event: Bond): void {
   transcoder.save();
   protocol.save();
 
-  // Save delegator snapshot for historical stake/reward computation
-  let snapshotId = event.params.delegator.toHex() + "-" + round.id;
-  let snapshot = new DelegatorSnapshot(snapshotId);
-  snapshot.delegator = event.params.delegator.toHex();
-  snapshot.delegate = event.params.newDelegate.toHex();
-  snapshot.bondedAmount = delegator.bondedAmount;
-  snapshot.shares = delegator.shares;
-  snapshot.round = round.id;
-  snapshot.timestamp = event.block.timestamp.toI32();
-  snapshot.save();
+  saveDelegatorSnapshot(
+    event.params.delegator.toHex(),
+    event.params.newDelegate.toHex(),
+    delegator,
+    round.id,
+    event.block.timestamp.toI32()
+  );
 
   createOrLoadTransactionFromEvent(event);
 
@@ -292,24 +280,11 @@ export function unbond(event: Unbond): void {
     convertToDecimal(event.params.amount)
   );
 
-  // Compute shares from new bonded amount
-  if (delegatorData.value0.isZero()) {
-    delegator.shares = ZERO_BI;
-  } else {
-    let poolForShares = Pool.load(
-      makePoolId(event.params.delegate.toHex(), round.id)
-    );
-    let sharesRefCRF = PRECISE_PERC_DIVISOR;
-    if (
-      poolForShares &&
-      !poolForShares.cumulativeRewardFactor.equals(ZERO_BI)
-    ) {
-      sharesRefCRF = poolForShares.cumulativeRewardFactor;
-    }
-    delegator.shares = delegatorData.value0
-      .times(PRECISE_PERC_DIVISOR)
-      .div(sharesRefCRF);
-  }
+  delegator.shares = computeShares(
+    event.params.delegate.toHex(),
+    round.id,
+    delegatorData.value0
+  );
 
   // Delegator no longer delegated to anyone if it does not have a bonded amount
   // so remove it from delegate
@@ -343,16 +318,13 @@ export function unbond(event: Unbond): void {
   protocol.save();
   round.save();
 
-  // Save delegator snapshot for historical stake/reward computation
-  let snapshotId = event.params.delegator.toHex() + "-" + round.id;
-  let snapshot = new DelegatorSnapshot(snapshotId);
-  snapshot.delegator = event.params.delegator.toHex();
-  snapshot.delegate = delegator.delegate;
-  snapshot.bondedAmount = delegator.bondedAmount;
-  snapshot.shares = delegator.shares;
-  snapshot.round = round.id;
-  snapshot.timestamp = event.block.timestamp.toI32();
-  snapshot.save();
+  saveDelegatorSnapshot(
+    event.params.delegator.toHex(),
+    delegator.delegate ? delegator.delegate! : "",
+    delegator,
+    round.id,
+    event.block.timestamp.toI32()
+  );
 
   createOrLoadTransactionFromEvent(event);
 
@@ -414,20 +386,11 @@ export function rebond(event: Rebond): void {
   delegator.bondedAmount = convertToDecimal(delegatorData.value0);
   delegator.fees = convertToDecimal(delegatorData.value1);
 
-  // Compute shares: bondedAmount * 10^27 / crf[lastClaimRound]
-  let poolForShares = Pool.load(
-    makePoolId(event.params.delegate.toHex(), round.id)
+  delegator.shares = computeShares(
+    event.params.delegate.toHex(),
+    round.id,
+    delegatorData.value0
   );
-  let sharesRefCRF = PRECISE_PERC_DIVISOR;
-  if (
-    poolForShares &&
-    !poolForShares.cumulativeRewardFactor.equals(ZERO_BI)
-  ) {
-    sharesRefCRF = poolForShares.cumulativeRewardFactor;
-  }
-  delegator.shares = delegatorData.value0
-    .times(PRECISE_PERC_DIVISOR)
-    .div(sharesRefCRF);
 
   // If the sender field for the lock is equal to the delegator's address then
   // we know that this is an unbonding lock the delegator created by calling
@@ -449,16 +412,13 @@ export function rebond(event: Rebond): void {
   delegator.save();
   protocol.save();
 
-  // Save delegator snapshot for historical stake/reward computation
-  let snapshotId = event.params.delegator.toHex() + "-" + round.id;
-  let snapshot = new DelegatorSnapshot(snapshotId);
-  snapshot.delegator = event.params.delegator.toHex();
-  snapshot.delegate = event.params.delegate.toHex();
-  snapshot.bondedAmount = delegator.bondedAmount;
-  snapshot.shares = delegator.shares;
-  snapshot.round = round.id;
-  snapshot.timestamp = event.block.timestamp.toI32();
-  snapshot.save();
+  saveDelegatorSnapshot(
+    event.params.delegator.toHex(),
+    event.params.delegate.toHex(),
+    delegator,
+    round.id,
+    event.block.timestamp.toI32()
+  );
 
   if (unbondingLock) {
     store.remove("UnbondingLock", uniqueUnbondingLockId);
@@ -584,6 +544,11 @@ export function reward(event: Reward): void {
   );
   transcoder.lastRewardRound = round.id;
 
+  // Snapshot activeCumulativeRewards from pendingRewardCommission, mirroring
+  // the contract's updateTranscoderWithRewards (line 1490):
+  // t.activeCumulativeRewards = t.cumulativeRewards
+  transcoder.activeCumulativeRewards = transcoder.pendingRewardCommission;
+
   // Compute cumulative reward factor (matches on-chain PreciseMathUtils)
   // The pool's CRF was propagated from the previous round during pool creation,
   // so it already contains the correct previous cumulative reward factor.
@@ -593,8 +558,8 @@ export function reward(event: Reward): void {
   }
 
   let totalRewardTokens = event.params.amount; // raw BigInt in wei
-  let transcoderCommission = percOf(totalRewardTokens, pool!.rewardCut);
-  let delegatorsRewards = totalRewardTokens.minus(transcoderCommission);
+  let transcoderCommissionRewards = percOf(totalRewardTokens, pool!.rewardCut);
+  let delegatorsRewards = totalRewardTokens.minus(transcoderCommissionRewards);
 
   // Compute rewards earned by the transcoder's own staked commission
   let totalStakeBI = convertFromDecimal(pool!.totalStake);
@@ -609,10 +574,10 @@ export function reward(event: Reward): void {
 
   // Accumulate orchestrator reward commission (rewardCut + rewards on staked commission)
   transcoder.pendingRewardCommission = transcoder.pendingRewardCommission
-    .plus(transcoderCommission)
+    .plus(transcoderCommissionRewards)
     .plus(transcoderRewardStakeRewards);
   transcoder.lifetimeRewardCommission = transcoder.lifetimeRewardCommission
-    .plus(transcoderCommission)
+    .plus(transcoderCommissionRewards)
     .plus(transcoderRewardStakeRewards);
   if (totalStakeBI.gt(ZERO_BI)) {
     pool!.cumulativeRewardFactor = prevCRF.plus(
@@ -807,7 +772,9 @@ export function earningsClaimed(event: EarningsClaimed): void {
     );
     transcoder.pendingRewardCommission = ZERO_BI;
     transcoder.pendingFeeCommission = ZERO_BI;
-    transcoder.activeCumulativeRewards = ZERO_BI;
+    // activeCumulativeRewards is NOT reset here — the contract preserves it
+    // until the next reward() call. The claimed commission stays in totalStake
+    // (as regular bondedAmount) and should still earn its share of fees.
     transcoder.save();
   }
 

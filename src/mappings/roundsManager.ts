@@ -128,11 +128,16 @@ export function newRound(event: NewRound): void {
     // given transcoder and round then we know the transcoder failed to call reward()
     createOrLoadPool(round.id, currentTranscoder.toHex());
 
-    if (transcoder) {
-      // Snapshot pendingRewardCommission as activeCumulativeRewards for this round,
-      // mirroring the contract's setCurrentRoundTotalActiveStake snapshot
-      transcoder.activeCumulativeRewards = transcoder.pendingRewardCommission;
-      transcoder.save();
+    // Snapshot pendingRewardCommission as activeCumulativeRewards for this round,
+    // mirroring the contract's setCurrentRoundTotalActiveStake snapshot.
+    // Load a fresh copy rather than reusing `transcoder`: for the first
+    // transcoder in the pool that variable was loaded before the pending
+    // (de)activation loops above, so saving it would overwrite `active`.
+    let poolTranscoder = Transcoder.load(currentTranscoder.toHex());
+    if (poolTranscoder) {
+      poolTranscoder.activeCumulativeRewards =
+        poolTranscoder.pendingRewardCommission;
+      poolTranscoder.save();
     }
 
     currentTranscoder =
